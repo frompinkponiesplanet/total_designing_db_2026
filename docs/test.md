@@ -515,9 +515,464 @@ END $$;
 
 ### 6.3. rating_change — пересчёт рейтинга
 
-Триггер должен пересчитывать рейтинг при `INSERT`, `UPDATE` и `DELETE` в `egorov_food.review`. По проектному backlog проверка: три отзыва на одно блюдо с рейтингами 3, 4, 5 дают среднее 4; удаление одного отзыва даёт среднее 4.5; удаление всех отзывов даёт `NULL`.
+```sql
+BEGIN;
 
-Вручную выбери тестовое блюдо и заказ, вставь три тестовых отзыва с уникальными UUID через `exts.uuid_generate_v4()`, затем проверь `egorov_food.product.rating`. Удаляй только созданные тестовые отзывы.
+-- =========================================================
+-- 1. Создание временных таблиц для хранения тестовых ID
+-- =========================================================
+
+CREATE TEMP TABLE test_refs (
+    client_id UUID,
+    client_address_id UUID,
+    restaurant_address_id UUID,
+    courier_id UUID,
+    category_id UUID,
+    restaurant_id UUID,
+    product_id UUID
+);
+
+CREATE TEMP TABLE test_orders (
+    order_id UUID
+);
+
+CREATE TEMP TABLE test_reviews (
+    review_id UUID,
+    review_rating NUMERIC(2,1)
+);
+
+
+-- =========================================================
+-- 2. Создание клиента
+-- =========================================================
+
+INSERT INTO egorov_food.client (
+    login,
+    password,
+    phone_number
+)
+VALUES (
+    'rating_test_client',
+    md5('rating_test_password'),
+    '+79991110001'
+)
+RETURNING client_id;
+
+
+-- =========================================================
+-- 3. Создание адресов
+-- =========================================================
+
+INSERT INTO egorov_food.address (
+    street,
+    house_number,
+    apartment_office
+)
+VALUES (
+    'Тестовая улица клиента',
+    '10',
+    '15'
+)
+RETURNING address_id;
+
+
+INSERT INTO egorov_food.address (
+    street,
+    house_number,
+    apartment_office
+)
+VALUES (
+    'Тестовая улица ресторана',
+    '20',
+    NULL
+)
+RETURNING address_id;
+
+
+-- Сохраняем созданные идентификаторы
+
+INSERT INTO test_refs (
+    client_id,
+    client_address_id,
+    restaurant_address_id
+)
+SELECT
+    c.client_id,
+    a1.address_id,
+    a2.address_id
+FROM egorov_food.client c
+CROSS JOIN egorov_food.address a1
+CROSS JOIN egorov_food.address a2
+WHERE c.login = 'rating_test_client'
+  AND a1.street = 'Тестовая улица клиента'
+  AND a2.street = 'Тестовая улица ресторана';
+
+
+-- =========================================================
+-- 4. Связь клиента с адресом
+-- =========================================================
+
+INSERT INTO egorov_food.client_address (
+    client_id,
+    address_id
+)
+SELECT
+    client_id,
+    client_address_id
+FROM test_refs;
+
+
+-- =========================================================
+-- 5. Создание курьера
+-- =========================================================
+
+INSERT INTO egorov_food.courier (
+    fio,
+    phone_number,
+    status,
+    hire_date,
+    dismissal_date,
+    coefficient
+)
+VALUES (
+    'Тестовый курьер',
+    '+79991110002',
+    'свободен',
+    CURRENT_DATE - 30,
+    NULL,
+    0.1
+);
+
+
+-- =========================================================
+-- 6. Создание категории
+-- =========================================================
+
+INSERT INTO egorov_food.product_category (
+    product_category_name
+)
+VALUES (
+    'Тестовая категория рейтинга'
+);
+
+
+-- =========================================================
+-- 7. Создание ресторана
+-- =========================================================
+
+INSERT INTO egorov_food.restaurant (
+    restaurant_name,
+    address_id,
+    description,
+    work_start,
+    work_end,
+    company_details,
+    rating,
+    status
+)
+SELECT
+    'Тестовый ресторан рейтинга',
+    restaurant_address_id,
+    'Ресторан для проверки триггера rating_change',
+    TIME '09:00',
+    TIME '22:00',
+    'Тестовые реквизиты',
+    NULL,
+    'активен'
+FROM test_refs;
+
+
+-- =========================================================
+-- 8. Создание блюда
+-- =========================================================
+
+INSERT INTO egorov_food.product (
+    product_name,
+    product_category_id,
+    price,
+    restaurant_id,
+    photo_url,
+    rating,
+    status,
+    description
+)
+SELECT
+    'Тестовое блюдо rating_change',
+    pc.product_category_id,
+    1000.00,
+    r.restaurant_id,
+    NULL,
+    NULL,
+    'доступно',
+    'Блюдо для проверки автоматического пересчёта рейтинга'
+FROM egorov_food.product_category pc
+CROSS JOIN egorov_food.restaurant r
+WHERE pc.product_category_name = 'Тестовая категория рейтинга'
+  AND r.restaurant_name = 'Тестовый ресторан рейтинга';
+
+
+-- =========================================================
+-- 9. Сохраняем идентификаторы остальных объектов
+-- =========================================================
+
+UPDATE test_refs
+SET
+    courier_id = (
+        SELECT courier_id
+        FROM egorov_food.courier
+        WHERE fio = 'Тестовый курьер'
+    ),
+    category_id = (
+        SELECT product_category_id
+        FROM egorov_food.product_category
+        WHERE product_category_name = 'Тестовая категория рейтинга'
+    ),
+    restaurant_id = (
+        SELECT restaurant_id
+        FROM egorov_food.restaurant
+        WHERE restaurant_name = 'Тестовый ресторан рейтинга'
+    ),
+    product_id = (
+        SELECT product_id
+        FROM egorov_food.product
+        WHERE product_name = 'Тестовое блюдо rating_change'
+    );
+
+
+-- =========================================================
+-- 10. Создание трёх заказов
+-- =========================================================
+
+INSERT INTO egorov_food."order" (
+    courier_id,
+    client_id,
+    address_id,
+    restaurant_id,
+    order_timestamp,
+    delivery_timestamp,
+    order_amount,
+    commission,
+    total_amount,
+    status,
+    pay_status,
+    description
+)
+SELECT
+    tr.courier_id,
+    tr.client_id,
+    tr.client_address_id,
+    tr.restaurant_id,
+    LOCALTIMESTAMP - INTERVAL '1 day',
+    LOCALTIMESTAMP - INTERVAL '1 day' + INTERVAL '30 minutes',
+    1000.00,
+    100.00,
+    1100.00,
+    'доставлен',
+    'оплачен',
+    'Тестовый заказ для проверки рейтинга'
+FROM test_refs tr
+CROSS JOIN generate_series(1, 3);
+
+
+-- Сохраняем ID заказов
+
+INSERT INTO test_orders (order_id)
+SELECT o.order_id
+FROM egorov_food."order" o
+JOIN test_refs tr
+    ON o.client_id = tr.client_id
+WHERE o.description = 'Тестовый заказ для проверки рейтинга'
+ORDER BY o.order_id;
+
+
+-- =========================================================
+-- 11. Добавление блюд в состав заказов
+-- =========================================================
+
+INSERT INTO egorov_food.order_structure (
+    order_id,
+    product_id,
+    quantity
+)
+SELECT
+    o.order_id,
+    tr.product_id,
+    1.000
+FROM test_orders o
+CROSS JOIN test_refs tr;
+
+
+-- =========================================================
+-- 12. Создание успешных оплат
+-- =========================================================
+
+INSERT INTO egorov_food.payment (
+    order_id,
+    payment_type,
+    amount,
+    transaction_id,
+    transaction_timestamp,
+    status
+)
+SELECT
+    o.order_id,
+    'карта',
+    1100.00,
+    'rating_test_' || o.order_id::text,
+    LOCALTIMESTAMP,
+    'успех'
+FROM test_orders o;
+
+
+-- =========================================================
+-- 13. ПРОВЕРКА №1 — добавление трёх отзывов
+-- =========================================================
+
+-- Ожидаемые рейтинги: 3, 4, 5
+
+WITH inserted_reviews AS (
+    INSERT INTO egorov_food.review (
+        client_id,
+        review_timestamp,
+        entity_id,
+        entity_type,
+        order_id,
+        description,
+        photo_url,
+        rating
+    )
+    SELECT
+        tr.client_id,
+        LOCALTIMESTAMP,
+        tr.product_id,
+        'блюдо',
+        o.order_id,
+        'Тестовый отзыв для rating_change',
+        NULL,
+        v.rating
+    FROM (
+        SELECT
+            order_id,
+            ROW_NUMBER() OVER (ORDER BY order_id) AS rn
+        FROM test_orders
+    ) o
+    CROSS JOIN test_refs tr
+    JOIN (
+        VALUES
+            (1, 3.0::NUMERIC(2,1)),
+            (2, 4.0::NUMERIC(2,1)),
+            (3, 5.0::NUMERIC(2,1))
+    ) v(rn, rating)
+        ON v.rn = o.rn
+    RETURNING review_id, rating
+)
+INSERT INTO test_reviews
+SELECT review_id, rating
+FROM inserted_reviews;
+
+
+-- Проверяем результат INSERT
+
+SELECT
+    p.product_name,
+    p.rating AS actual_rating,
+    ROUND(AVG(r.rating), 2) AS expected_rating,
+    CASE
+        WHEN p.rating = ROUND(AVG(r.rating), 2)
+        THEN 'PASS'
+        ELSE 'FAIL'
+    END AS test_result
+FROM egorov_food.product p
+JOIN test_refs tr
+    ON tr.product_id = p.product_id
+JOIN egorov_food.review r
+    ON r.entity_id = p.product_id
+   AND r.entity_type = 'блюдо'
+GROUP BY p.product_id, p.product_name, p.rating;
+
+
+-- =========================================================
+-- 14. ПРОВЕРКА №2 — удаление одного отзыва
+-- =========================================================
+
+-- Удаляем отзыв с рейтингом 3
+
+DELETE FROM egorov_food.review
+WHERE review_id = (
+    SELECT review_id
+    FROM test_reviews
+    WHERE review_rating = 3.0
+);
+
+
+-- Проверяем результат DELETE
+
+SELECT
+    p.product_name,
+    p.rating AS actual_rating,
+    ROUND(AVG(r.rating), 2) AS expected_rating,
+    CASE
+        WHEN p.rating = ROUND(AVG(r.rating), 2)
+        THEN 'PASS'
+        ELSE 'FAIL'
+    END AS test_result
+FROM egorov_food.product p
+JOIN test_refs tr
+    ON tr.product_id = p.product_id
+JOIN egorov_food.review r
+    ON r.entity_id = p.product_id
+   AND r.entity_type = 'блюдо'
+GROUP BY p.product_id, p.product_name, p.rating;
+
+
+-- =========================================================
+-- 15. ПРОВЕРКА №3 — удаление всех оставшихся отзывов
+-- =========================================================
+
+DELETE FROM egorov_food.review
+WHERE review_id IN (
+    SELECT review_id
+    FROM test_reviews
+);
+
+
+-- Проверяем результат DELETE всех отзывов
+
+SELECT
+    p.product_name,
+    p.rating AS actual_rating,
+    CASE
+        WHEN p.rating IS NULL
+        THEN 'PASS'
+        ELSE 'FAIL'
+    END AS test_result
+FROM egorov_food.product p
+JOIN test_refs tr
+    ON tr.product_id = p.product_id;
+
+
+-- =========================================================
+-- 16. Итоговая проверка триггера
+-- =========================================================
+
+SELECT
+    trigger_name,
+    event_manipulation,
+    action_timing,
+    action_statement
+FROM information_schema.triggers
+WHERE event_object_schema = 'egorov_food'
+  AND event_object_table = 'review'
+  AND trigger_name = 'trg_rating_change'
+ORDER BY event_manipulation;
+
+
+-- =========================================================
+-- 17. Откат тестовых данных
+-- =========================================================
+
+ROLLBACK;
+```
 
 ### 6.4. get_statistic()
 
@@ -534,39 +989,377 @@ SELECT * FROM egorov_food.get_statistic();
 ### 6.5. courier_salary()
 
 ```sql
-SELECT courier_id, coefficient
-FROM egorov_food.courier
-ORDER BY courier_id;
+BEGIN;
+
+SET LOCAL search_path = egorov_food, exts, public;
+
+-- ------------------------------------------------------------
+-- 1. Создаём тестового клиента
+-- ------------------------------------------------------------
+
+INSERT INTO egorov_food.client (
+    client_id,
+    login,
+    password,
+    phone_number
+)
+VALUES (
+    'a0000000-0000-0000-0000-000000000001',
+    'food107_test_client',
+    md5('food107_test_password'),
+    '+70000000001'
+);
+
+-- ------------------------------------------------------------
+-- 2. Создаём адрес клиента и адрес ресторана
+-- ------------------------------------------------------------
+
+INSERT INTO egorov_food.address (
+    address_id,
+    street,
+    house_number,
+    apartment_office
+)
+VALUES
+(
+    'a0000000-0000-0000-0000-000000000002',
+    'Тестовая улица',
+    '10',
+    '15'
+),
+(
+    'a0000000-0000-0000-0000-000000000006',
+    'Тестовый проспект',
+    '20',
+    NULL
+);
+
+-- ВАЖНО:
+-- Связываем клиента с адресом доставки.
+-- Без этой записи INSERT в таблицу order нарушит fk_order_client_address.
+
+INSERT INTO egorov_food.client_address (
+    client_id,
+    address_id
+)
+VALUES (
+    'a0000000-0000-0000-0000-000000000001',
+    'a0000000-0000-0000-0000-000000000002'
+);
+
+-- ------------------------------------------------------------
+-- 3. Создаём ресторан
+-- ------------------------------------------------------------
+
+INSERT INTO egorov_food.restaurant (
+    restaurant_id,
+    restaurant_name,
+    address_id,
+    description,
+    work_start,
+    work_end,
+    company_details,
+    rating,
+    status
+)
+VALUES (
+    'a0000000-0000-0000-0000-000000000003',
+    'FOOD-107 Тестовый ресторан',
+    'a0000000-0000-0000-0000-000000000006',
+    'Ресторан для проверки расчёта зарплаты курьеров',
+    '09:00',
+    '22:00',
+    'Тестовые реквизиты FOOD-107',
+    5.00,
+    'активен'
+);
+
+-- ------------------------------------------------------------
+-- 4. Создаём пять тестовых курьеров
+-- ------------------------------------------------------------
+
+INSERT INTO egorov_food.courier (
+    courier_id,
+    fio,
+    phone_number,
+    status,
+    hire_date,
+    dismissal_date,
+    coefficient
+)
+VALUES
+(
+    'a0000000-0000-0000-0000-000000000010',
+    'FOOD107 Курьер 0 заказов',
+    '+70000000101',
+    'свободен',
+    CURRENT_DATE -  INTERVAL '1 year',
+    NULL,
+    0.5
+),
+(
+    'a0000000-0000-0000-0000-000000000011',
+    'FOOD107 Курьер 151 заказ',
+    '+70000000102',
+    'свободен',
+    CURRENT_DATE - INTERVAL '1 year',
+    NULL,
+    0.1
+),
+(
+    'a0000000-0000-0000-0000-000000000012',
+    'FOOD107 Курьер 251 заказ',
+    '+70000000103',
+    'занят',
+    CURRENT_DATE - INTERVAL '1 year',
+    NULL,
+    0.2
+),
+(
+    'a0000000-0000-0000-0000-000000000013',
+    'FOOD107 Курьер 501 заказ',
+    '+70000000104',
+    'на_доставке',
+    CURRENT_DATE - INTERVAL '1 year',
+    NULL,
+    0.3
+),
+(
+    'a0000000-0000-0000-0000-000000000014',
+    'FOOD107 Уволенный курьер',
+    '+70000000105',
+    'уволен',
+    CURRENT_DATE - INTERVAL '1 year',
+    CURRENT_DATE - 1,
+    0.3
+);
+
+-- ------------------------------------------------------------
+-- 5. Создаём заказы
+-- ------------------------------------------------------------
+-- Каждый доставленный заказ:
+-- order_amount = 1000
+-- commission   = 100
+-- total_amount = 1100
+--
+-- Все заказы созданы в текущем календарном месяце.
+-- ------------------------------------------------------------
+
+-- 5.1. Курьер без доставленных заказов.
+-- Добавляем заказы с разными статусами, чтобы проверить,
+-- что они не учитываются при расчёте зарплаты.
+
+INSERT INTO egorov_food."order" (
+    courier_id,
+    client_id,
+    address_id,
+    restaurant_id,
+    order_timestamp,
+    delivery_timestamp,
+    order_amount,
+    commission,
+    total_amount,
+    status,
+    description
+)
+VALUES
+(
+    'a0000000-0000-0000-0000-000000000010',
+    'a0000000-0000-0000-0000-000000000001',
+    'a0000000-0000-0000-0000-000000000002',
+    'a0000000-0000-0000-0000-000000000003',
+    date_trunc('month', CURRENT_DATE) + INTERVAL '1 day',
+    NULL, 1000, 100, 1100,
+    'создан',
+    'FOOD-107 Проверка статуса создан'
+),
+(
+    'a0000000-0000-0000-0000-000000000010',
+    'a0000000-0000-0000-0000-000000000001',
+    'a0000000-0000-0000-0000-000000000002',
+    'a0000000-0000-0000-0000-000000000003',
+    date_trunc('month', CURRENT_DATE) + INTERVAL '1 day',
+    NULL, 1000, 100, 1100,
+    'готовится',
+    'FOOD-107 Проверка статуса готовится'
+),
+(
+    'a0000000-0000-0000-0000-000000000010',
+    'a0000000-0000-0000-0000-000000000001',
+    'a0000000-0000-0000-0000-000000000002',
+    'a0000000-0000-0000-0000-000000000003',
+    date_trunc('month', CURRENT_DATE) + INTERVAL '1 day',
+    NULL, 1000, 100, 1100,
+    'в_доставке',
+    'FOOD-107 Проверка статуса в доставке'
+),
+(
+    'a0000000-0000-0000-0000-000000000010',
+    'a0000000-0000-0000-0000-000000000001',
+    'a0000000-0000-0000-0000-000000000002',
+    'a0000000-0000-0000-0000-000000000003',
+    date_trunc('month', CURRENT_DATE) + INTERVAL '1 day',
+    NULL, 1000, 100, 1100,
+    'отменён',
+    'FOOD-107 Проверка статуса отменён'
+);
+
+-- 5.2. Для остальных курьеров создаём доставленные заказы.
+-- 151, 251, 501 и 151 заказ соответственно.
+
+INSERT INTO egorov_food."order" (
+    courier_id,
+    client_id,
+    address_id,
+    restaurant_id,
+    order_timestamp,
+    delivery_timestamp,
+    order_amount,
+    commission,
+    total_amount,
+    status,
+    description
+)
+SELECT
+    v.courier_id,
+    'a0000000-0000-0000-0000-000000000001',
+    'a0000000-0000-0000-0000-000000000002',
+    'a0000000-0000-0000-0000-000000000003',
+    date_trunc('month', CURRENT_DATE) + INTERVAL '1 day',
+    date_trunc('month', CURRENT_DATE) + INTERVAL '1 day 30 minutes',
+    1000,
+    100,
+    1100,
+    'доставлен',
+    'FOOD-107 Тестовый доставленный заказ'
+FROM (
+    VALUES
+        ('a0000000-0000-0000-0000-000000000011'::UUID, 151),
+        ('a0000000-0000-0000-0000-000000000012'::UUID, 251),
+        ('a0000000-0000-0000-0000-000000000013'::UUID, 501),
+        ('a0000000-0000-0000-0000-000000000014'::UUID, 151)
+) AS v(courier_id, order_count)
+CROSS JOIN LATERAL generate_series(1, v.order_count);
+
+-- ------------------------------------------------------------
+-- 6. Проверяем исходные данные до вызова процедуры
+-- ------------------------------------------------------------
+
+SELECT
+    c.fio,
+    c.coefficient AS initial_coefficient,
+    COUNT(o.order_id) FILTER (
+        WHERE o.status = 'доставлен'
+    ) AS delivered_orders,
+    COALESCE(
+        SUM(o.commission) FILTER (
+            WHERE o.status = 'доставлен'
+        ),
+        0
+    ) AS delivered_commission
+FROM egorov_food.courier c
+LEFT JOIN egorov_food."order" o
+    ON o.courier_id = c.courier_id
+   AND o.order_timestamp >= date_trunc('month', CURRENT_DATE)
+   AND o.order_timestamp < date_trunc('month', CURRENT_DATE)
+                              + INTERVAL '1 month'
+WHERE c.courier_id BETWEEN
+    'a0000000-0000-0000-0000-000000000010'::UUID
+    AND
+    'a0000000-0000-0000-0000-000000000014'::UUID
+GROUP BY c.courier_id, c.fio, c.coefficient
+ORDER BY c.courier_id;
+
+-- ------------------------------------------------------------
+-- 7. Первый запуск FOOD-107
+-- ------------------------------------------------------------
 
 CALL egorov_food.courier_salary();
 
-SELECT courier_id, coefficient
-FROM egorov_food.courier
-ORDER BY courier_id;
+-- ------------------------------------------------------------
+-- 8. Проверяем рассчитанную зарплату и новые коэффициенты
+-- ------------------------------------------------------------
 
-SELECT year, month, courier_id, amount, coefficient_used
-FROM egorov_food.courier_pay
-ORDER BY year DESC, month DESC, courier_id
-LIMIT 20;
-```
+SELECT
+    c.fio,
+    cp.amount AS calculated_salary,
+    cp.coefficient_used AS coefficient_for_current_month,
+    c.coefficient AS coefficient_for_next_month
+FROM egorov_food.courier_pay cp
+JOIN egorov_food.courier c
+    ON c.courier_id = cp.courier_id
+WHERE cp.year = EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER
+  AND cp.month = EXTRACT(MONTH FROM CURRENT_DATE)::INTEGER
+  AND c.courier_id BETWEEN
+      'a0000000-0000-0000-0000-000000000010'::UUID
+      AND
+      'a0000000-0000-0000-0000-000000000014'::UUID
+ORDER BY c.courier_id;
 
-Ожидается:
-- коэффициент работающих курьеров пересчитан по BR-10.2;
-- коэффициент уволенных курьеров не обновляется;
-- `courier_pay` содержит запись за текущий месяц.
+-- Ожидаемые результаты:
+--
+-- Курьер 0 заказов:
+--   зарплата = 0
+--   коэффициент текущего месяца = 0.5
+--   коэффициент следующего месяца = 0.1
+--
+-- Курьер 151 заказ:
+--   зарплата = 1510
+--   коэффициент текущего месяца = 0.1
+--   коэффициент следующего месяца = 0.2
+--
+-- Курьер 251 заказ:
+--   зарплата = 5020
+--   коэффициент текущего месяца = 0.2
+--   коэффициент следующего месяца = 0.3
+--
+-- Курьер 501 заказ:
+--   зарплата = 15030
+--   коэффициент текущего месяца = 0.3
+--   коэффициент следующего месяца = 0.5
+--
+-- Уволенный курьер:
+--   зарплата = 4530
+--   коэффициент текущего месяца = 0.3
+--   коэффициент следующего месяца остаётся 0.3
 
-### 6.6. courier_salary — повторный вызов
 
-```sql
+-- ------------------------------------------------------------
+-- 9. Второй запуск FOOD-107
+-- Проверяем повторный запуск и отсутствие дублирования выплат
+-- ------------------------------------------------------------
+
 CALL egorov_food.courier_salary();
 
-SELECT count(*) AS current_month_payments
-FROM egorov_food.courier_pay
-WHERE year = extract(year FROM current_date)
-  AND month = extract(month FROM current_date);
+SELECT
+    c.fio,
+    COUNT(cp.courier_id) AS payment_records,
+    MAX(cp.amount) AS salary_after_second_call,
+    MAX(cp.coefficient_used) AS coefficient_used,
+    c.coefficient AS coefficient_for_next_month
+FROM egorov_food.courier c
+LEFT JOIN egorov_food.courier_pay cp
+    ON cp.courier_id = c.courier_id
+   AND cp.year = EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER
+   AND cp.month = EXTRACT(MONTH FROM CURRENT_DATE)::INTEGER
+WHERE c.courier_id BETWEEN
+    'a0000000-0000-0000-0000-000000000010'::UUID
+    AND
+    'a0000000-0000-0000-0000-000000000014'::UUID
+GROUP BY c.courier_id, c.fio, c.coefficient
+ORDER BY c.courier_id;
+
+-- Для каждого курьера payment_records должен быть равен 1.
+-- Суммы зарплаты и coefficient_used должны совпадать с первым запуском.
+
+
+-- ------------------------------------------------------------
+-- 10. Откатываем все тестовые изменения
+-- ------------------------------------------------------------
+
+ROLLBACK;
 ```
 
-Ожидается: повторный вызов обновляет существующие записи и не создаёт дубликаты.
 
 ---
 
