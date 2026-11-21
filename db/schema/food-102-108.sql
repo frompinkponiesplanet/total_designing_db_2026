@@ -7,25 +7,8 @@ CREATE OR REPLACE PROCEDURE egorov_food.insert_test_data(value integer)
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_clients uuid[] := ARRAY[]::uuid[];
-    v_couriers uuid[] := ARRAY[]::uuid[];
-    v_categories uuid[] := ARRAY[]::uuid[];
-    v_restaurants uuid[] := ARRAY[]::uuid[];
-    v_addresses uuid[] := ARRAY[]::uuid[];
-    v_products uuid[] := ARRAY[]::uuid[];
-    v_orders uuid[] := ARRAY[]::uuid[];
-    v_order_products uuid[] := ARRAY[]::uuid[];
-    v_order_restaurants uuid[] := ARRAY[]::uuid[];
-    v_order_clients uuid[] := ARRAY[]::uuid[];
-    v_order_couriers uuid[] := ARRAY[]::uuid[];
-    v_order_months date[] := ARRAY[]::date[];
-    v_order_commissions numeric[] := ARRAY[]::numeric[];
-    v_order_totals numeric[] := ARRAY[]::numeric[];
-    v_order_timestamps timestamp[] := ARRAY[]::timestamp[];
-    v_order_addresses uuid[] := ARRAY[]::uuid[];
     v_id uuid;
     v_hire_date date;
-    v_dismissal date;
     v_status egorov_food.courier_status;
     v_review_type egorov_food.review_entity_type;
     v_payment_type egorov_food.payment_type;
@@ -46,11 +29,64 @@ DECLARE
     v_next_coefficient numeric(2,1);
     v_deliveries integer;
     v_commission_sum numeric(14,2);
-    v_last_month date;
+    v_random_number integer;
 BEGIN
     IF value IS NULL OR value <= 0 THEN
         RAISE EXCEPTION 'Параметр value должен быть положительным целым числом';
     END IF;
+
+    -- Временные таблицы нужны, чтобы сохранять созданные идентификаторы
+    -- и использовать их при добавлении связанных записей.
+    -- Временные таблицы удаляются после завершения транзакции.
+
+    DROP TABLE IF EXISTS pg_temp.tmp_food_clients;
+    DROP TABLE IF EXISTS pg_temp.tmp_food_couriers;
+    DROP TABLE IF EXISTS pg_temp.tmp_food_categories;
+    DROP TABLE IF EXISTS pg_temp.tmp_food_addresses;
+    DROP TABLE IF EXISTS pg_temp.tmp_food_restaurants;
+    DROP TABLE IF EXISTS pg_temp.tmp_food_products;
+    DROP TABLE IF EXISTS pg_temp.tmp_food_orders;
+
+    CREATE TEMP TABLE tmp_food_clients (
+        row_number integer PRIMARY KEY,
+        client_id uuid NOT NULL
+    ) ON COMMIT DROP;
+
+    CREATE TEMP TABLE tmp_food_couriers (
+        row_number integer PRIMARY KEY,
+        courier_id uuid NOT NULL
+    ) ON COMMIT DROP;
+
+    CREATE TEMP TABLE tmp_food_categories (
+        row_number integer PRIMARY KEY,
+        product_category_id uuid NOT NULL
+    ) ON COMMIT DROP;
+
+    CREATE TEMP TABLE tmp_food_addresses (
+        row_number integer PRIMARY KEY,
+        address_id uuid NOT NULL
+    ) ON COMMIT DROP;
+
+    CREATE TEMP TABLE tmp_food_restaurants (
+        row_number integer PRIMARY KEY,
+        restaurant_id uuid NOT NULL
+    ) ON COMMIT DROP;
+
+    CREATE TEMP TABLE tmp_food_products (
+        row_number integer PRIMARY KEY,
+        product_id uuid NOT NULL
+    ) ON COMMIT DROP;
+
+    CREATE TEMP TABLE tmp_food_orders (
+        row_number integer PRIMARY KEY,
+        order_id uuid NOT NULL,
+        product_id uuid NOT NULL,
+        restaurant_id uuid NOT NULL,
+        client_id uuid NOT NULL,
+        courier_id uuid NOT NULL,
+        total_amount numeric(12,2) NOT NULL,
+        order_timestamp timestamp NOT NULL
+    ) ON COMMIT DROP;
 
     -- 1. Клиенты: value строк.
     FOR v_i IN 1..value LOOP
@@ -59,106 +95,149 @@ BEGIN
             'client_' || md5(random()::text || clock_timestamp()::text),
             md5(random()::text),
             '+7' || lpad(floor(random() * 10000000000)::bigint::text, 10, '0')
-        ) RETURNING client_id INTO v_id;
-        v_clients := array_append(v_clients, v_id);
+        )
+        RETURNING client_id INTO v_id;
+
+        INSERT INTO tmp_food_clients (row_number, client_id)
+        VALUES (v_i, v_id);
     END LOOP;
 
-    -- 2. Курьеры: минимум один гарантированно работающий (BR-6.6).
+    -- 2. Курьеры: минимум один гарантированно работающий.
     FOR v_i IN 1..value LOOP
-        -- Курьеры наняты до начала генерируемого периода и остаются работающими:
-        -- это позволяет согласованно назначать им доставки во всех шести месяцах.
         v_hire_date := current_date - 180;
+
         IF v_i = 1 THEN
-            v_status := 'свободен'::egorov_food.courier_status;
+            v_status := 'свободен';
         ELSE
-            -- Берём только первые три значения enum: все они означают работающего курьера.
-            v_status := (enum_range(NULL::egorov_food.courier_status))[
-                floor(random() * 3)::integer + 1
-            ];
+            v_random_number := floor(random() * 3)::integer;
+
+            IF v_random_number = 0 THEN
+                v_status := 'свободен';
+            ELSIF v_random_number = 1 THEN
+                v_status := 'занят';
+            ELSE
+                v_status := 'на_доставке';
+            END IF;
         END IF;
-        v_dismissal := NULL;
+
         INSERT INTO egorov_food.courier
             (fio, phone_number, status, hire_date, dismissal_date, coefficient)
         VALUES (
             'Курьер ' || v_i || ' ' || substring(md5(random()::text), 1, 8),
             '+7' || lpad(floor(random() * 10000000000)::bigint::text, 10, '0'),
-            v_status, v_hire_date, v_dismissal, 0.1
-        ) RETURNING courier_id INTO v_id;
-        v_couriers := array_append(v_couriers, v_id);
+            v_status, v_hire_date, NULL, 0.1
+        )
+        RETURNING courier_id INTO v_id;
+
+        INSERT INTO tmp_food_couriers (row_number, courier_id)
+        VALUES (v_i, v_id);
     END LOOP;
 
     -- 3. Категории: value строк.
     FOR v_i IN 1..value LOOP
-        INSERT INTO egorov_food.product_category(product_category_name)
+        INSERT INTO egorov_food.product_category (product_category_name)
         VALUES ('Категория ' || v_i || '_' || substring(md5(random()::text), 1, 6))
         RETURNING product_category_id INTO v_id;
-        v_categories := array_append(v_categories, v_id);
+
+        INSERT INTO tmp_food_categories (row_number, product_category_id)
+        VALUES (v_i, v_id);
     END LOOP;
 
-    -- 4. Адреса: value * 5. Первые value предназначены ресторанам.
+    -- 4. Адреса: value * 5.
     FOR v_i IN 1..(value * 5) LOOP
-        INSERT INTO egorov_food.address(street, house_number, apartment_office)
+        INSERT INTO egorov_food.address (street, house_number, apartment_office)
         VALUES (
             'Улица ' || v_i || ' ' || substring(md5(random()::text), 1, 6),
             (1 + floor(random() * 200))::integer::text,
-            CASE WHEN random() < 0.35 THEN NULL
-                 ELSE (1 + floor(random() * 300))::integer::text END
-        ) RETURNING address_id INTO v_id;
-        v_addresses := array_append(v_addresses, v_id);
+            CASE
+                WHEN random() < 0.35 THEN NULL
+                ELSE (1 + floor(random() * 300))::integer::text
+            END
+        )
+        RETURNING address_id INTO v_id;
+
+        INSERT INTO tmp_food_addresses (row_number, address_id)
+        VALUES (v_i, v_id);
     END LOOP;
 
-    -- 5. Рестораны: каждому выделен отдельный адрес из первых value адресов.
+    -- 5. Рестораны: каждому ресторану назначается отдельный адрес.
     FOR v_i IN 1..value LOOP
+        SELECT address_id
+        INTO v_id
+        FROM tmp_food_addresses
+        WHERE row_number = v_i;
+
         INSERT INTO egorov_food.restaurant
             (restaurant_name, address_id, description, work_start, work_end,
              company_details, rating, status)
         VALUES (
             'Ресторан ' || v_i || '_' || substring(md5(random()::text), 1, 6),
-            v_addresses[v_i],
+            v_id,
             'Тестовое описание ресторана ' || v_i,
             TIME '09:00', TIME '22:00',
             'ИНН ' || lpad(floor(random() * 10000000000)::bigint::text, 10, '0') ||
             '; ОГРН ' || lpad(floor(random() * 10000000000000)::bigint::text, 13, '0'),
             NULL,
-            (enum_range(NULL::egorov_food.restaurant_status))[
-                floor(random() * cardinality(enum_range(NULL::egorov_food.restaurant_status)))::integer + 1
-            ]
-        ) RETURNING restaurant_id INTO v_id;
-        v_restaurants := array_append(v_restaurants, v_id);
+            CASE floor(random() * 2)::integer
+                WHEN 0 THEN 'активен'::egorov_food.restaurant_status
+                ELSE 'неактивен'::egorov_food.restaurant_status
+            END
+        )
+        RETURNING restaurant_id INTO v_id;
+
+        INSERT INTO tmp_food_restaurants (row_number, restaurant_id)
+        VALUES (v_i, v_id);
     END LOOP;
 
-    -- 6. Связи клиент—адрес: каждому клиенту назначаем его четыре адреса.
+    -- 6. Каждому клиенту назначаем четыре адреса.
     FOR v_i IN 1..value LOOP
         FOR v_j IN 1..4 LOOP
-            INSERT INTO egorov_food.client_address(client_id, address_id)
-            VALUES (v_clients[v_i], v_addresses[value + (v_i - 1) * 4 + v_j]);
+            INSERT INTO egorov_food.client_address (client_id, address_id)
+            SELECT c.client_id, a.address_id
+            FROM tmp_food_clients c
+            CROSS JOIN tmp_food_addresses a
+            WHERE c.row_number = v_i
+              AND a.row_number = value + (v_i - 1) * 4 + v_j;
         END LOOP;
     END LOOP;
 
-    -- 7. Блюда: по пять блюд на каждый ресторан, всего value * 5.
+    -- 7. Блюда: по пять блюд на каждый ресторан.
     FOR v_i IN 1..(value * 5) LOOP
         v_restaurant_idx := ((v_i - 1) / 5)::integer + 1;
+
+        SELECT restaurant_id
+        INTO v_id
+        FROM tmp_food_restaurants
+        WHERE row_number = v_restaurant_idx;
+
         INSERT INTO egorov_food.product
             (product_name, product_category_id, price, restaurant_id,
              photo_url, rating, status, description)
-        VALUES (
+        SELECT
             'Блюдо ' || v_i || '_' || substring(md5(random()::text), 1, 6),
-            v_categories[((v_i - 1) % value) + 1],
+            c.product_category_id,
             round((1200 + random() * 3800)::numeric, 2),
-            v_restaurants[v_restaurant_idx],
-            CASE WHEN random() < 0.25 THEN NULL
-                 ELSE 'https://cdn.foodexpress.ru/test/' || md5(random()::text) || '.jpg' END,
+            v_id,
+            CASE
+                WHEN random() < 0.25 THEN NULL
+                ELSE 'https://cdn.foodexpress.ru/test/' || md5(random()::text) || '.jpg'
+            END,
             NULL,
-            (enum_range(NULL::egorov_food.product_status))[
-                floor(random() * cardinality(enum_range(NULL::egorov_food.product_status)))::integer + 1
-            ],
+            CASE floor(random() * 3)::integer
+                WHEN 0 THEN 'доступно'::egorov_food.product_status
+                WHEN 1 THEN 'нет_в_наличии'::egorov_food.product_status
+                ELSE 'архив'::egorov_food.product_status
+            END,
             'Тестовое описание блюда ' || v_i
-        ) RETURNING product_id INTO v_id;
-        v_products := array_append(v_products, v_id);
+        FROM tmp_food_categories c
+        WHERE c.row_number = ((v_i - 1) % value) + 1
+        RETURNING product_id INTO v_id;
+
+        INSERT INTO tmp_food_products (row_number, product_id)
+        VALUES (v_i, v_id);
     END LOOP;
 
     -- 8. Заказы: value * 5. Все создаваемые заказы доставлены.
-    --    Для каждого заказа берём блюдо того же ресторана и адрес его клиента.
     FOR v_i IN 1..(value * 5) LOOP
         v_client_idx := ((v_i - 1) % value) + 1;
         v_restaurant_idx := ((v_i - 1) % value) + 1;
@@ -166,18 +245,28 @@ BEGIN
         v_courier_idx := ((v_i - 1) % value) + 1;
         v_quantity := 1.000;
 
-        -- Равномерно распределяем заказы по шести последним календарным месяцам.
-        v_month_start := (date_trunc('month', current_date)::date -
-                          ((5 - ((v_i - 1) % 6)) * interval '1 month'))::date;
-        v_month_end := LEAST((v_month_start + interval '1 month - 1 day')::date, current_date);
+        v_month_start := (
+            date_trunc('month', current_date)::date -
+            ((5 - ((v_i - 1) % 6)) * interval '1 month')
+        )::date;
+
+        v_month_end := LEAST(
+            (v_month_start + interval '1 month - 1 day')::date,
+            current_date
+        );
+
         v_order_ts := LEAST(
             (v_month_start + floor(random() * (v_month_end - v_month_start + 1))::integer)
-              + time '10:00' + (floor(random() * 36000)::integer * interval '1 second'),
+                + time '10:00' + (floor(random() * 36000)::integer * interval '1 second'),
             localtimestamp - interval '3 hours'
         );
 
-        SELECT price * v_quantity INTO v_amount
-        FROM egorov_food.product WHERE product_id = v_products[v_product_idx];
+        SELECT p.price * v_quantity
+        INTO v_amount
+        FROM tmp_food_products tp
+        JOIN egorov_food.product p ON p.product_id = tp.product_id
+        WHERE tp.row_number = v_product_idx;
+
         v_amount := round(v_amount, 2);
         v_commission := round(v_amount * 0.10, 2);
         v_total := v_amount + v_commission;
@@ -186,97 +275,139 @@ BEGIN
             (courier_id, client_id, address_id, restaurant_id, order_timestamp,
              delivery_timestamp, order_amount, commission, total_amount,
              status, pay_status, description)
-        VALUES (
-            v_couriers[v_courier_idx], v_clients[v_client_idx],
-            v_addresses[value + (v_client_idx - 1) * 4 + 1],
-            v_restaurants[v_restaurant_idx], v_order_ts,
+        SELECT
+            c.courier_id,
+            cl.client_id,
+            a.address_id,
+            r.restaurant_id,
+            v_order_ts,
             v_order_ts + (15 + floor(random() * 105)::integer) * interval '1 minute',
-            v_amount, v_commission, v_total,
+            v_amount,
+            v_commission,
+            v_total,
             'доставлен'::egorov_food.order_status,
             'оплачен'::egorov_food.order_pay_status,
             'Тестовый заказ ' || v_i
-        ) RETURNING order_id INTO v_id;
+        FROM tmp_food_couriers c
+        CROSS JOIN tmp_food_clients cl
+        CROSS JOIN tmp_food_addresses a
+        CROSS JOIN tmp_food_restaurants r
+        WHERE c.row_number = v_courier_idx
+          AND cl.row_number = v_client_idx
+          AND a.row_number = value + (v_client_idx - 1) * 4 + 1
+          AND r.row_number = v_restaurant_idx
+        RETURNING order_id INTO v_id;
 
-        v_orders := array_append(v_orders, v_id);
-        v_order_products := array_append(v_order_products, v_products[v_product_idx]);
-        v_order_restaurants := array_append(v_order_restaurants, v_restaurants[v_restaurant_idx]);
-        v_order_clients := array_append(v_order_clients, v_clients[v_client_idx]);
-        v_order_couriers := array_append(v_order_couriers, v_couriers[v_courier_idx]);
-        v_order_months := array_append(v_order_months, date_trunc('month', v_order_ts)::date);
-        v_order_commissions := array_append(v_order_commissions, v_commission);
-        v_order_totals := array_append(v_order_totals, v_total);
-        v_order_timestamps := array_append(v_order_timestamps, v_order_ts);
-        v_order_addresses := array_append(v_order_addresses,
-            v_addresses[value + (v_client_idx - 1) * 4 + 1]);
+        INSERT INTO tmp_food_orders
+            (row_number, order_id, product_id, restaurant_id, client_id,
+             courier_id, total_amount, order_timestamp)
+        SELECT
+            v_i, v_id, tp.product_id, r.restaurant_id, cl.client_id,
+            c.courier_id, v_total, v_order_ts
+        FROM tmp_food_products tp
+        CROSS JOIN tmp_food_restaurants r
+        CROSS JOIN tmp_food_clients cl
+        CROSS JOIN tmp_food_couriers c
+        WHERE tp.row_number = v_product_idx
+          AND r.row_number = v_restaurant_idx
+          AND cl.row_number = v_client_idx
+          AND c.row_number = v_courier_idx;
     END LOOP;
 
-    -- 9. Позиции заказов: одна уникальная позиция на каждый заказ.
-    FOR v_i IN 1..cardinality(v_orders) LOOP
-        INSERT INTO egorov_food.order_structure(order_id, product_id, quantity)
-        VALUES (v_orders[v_i], v_order_products[v_i], 1.000);
-    END LOOP;
+    -- 9. Добавляем состав каждого заказа.
+    INSERT INTO egorov_food.order_structure (order_id, product_id, quantity)
+    SELECT order_id, product_id, 1.000
+    FROM tmp_food_orders;
 
-    -- 10. Оплаты: одна успешная попытка на заказ, сумма = total_amount.
-    FOR v_i IN 1..cardinality(v_orders) LOOP
-        v_payment_type := (enum_range(NULL::egorov_food.payment_type))[
-            floor(random() * cardinality(enum_range(NULL::egorov_food.payment_type)))::integer + 1
-        ];
+    -- 10. Добавляем по одной успешной оплате на каждый заказ.
+    FOR v_i IN 1..(value * 5) LOOP
+        v_random_number := floor(random() * 3)::integer;
+
+        IF v_random_number = 0 THEN
+            v_payment_type := 'карта';
+        ELSIF v_random_number = 1 THEN
+            v_payment_type := 'наличные';
+        ELSE
+            v_payment_type := 'безнал';
+        END IF;
+
         INSERT INTO egorov_food.payment
             (order_id, payment_type, amount, transaction_id, transaction_timestamp, status)
-        VALUES (
-            v_orders[v_i], v_payment_type, v_order_totals[v_i],
+        SELECT
+            order_id,
+            v_payment_type,
+            total_amount,
             'test_tx_' || md5(random()::text || clock_timestamp()::text),
-            v_order_timestamps[v_i] + interval '1 minute',
+            order_timestamp + interval '1 minute',
             'успех'::egorov_food.payment_status
-        );
+        FROM tmp_food_orders
+        WHERE row_number = v_i;
     END LOOP;
 
-    -- 11. Отзывы: по одному отзыву на заказ. Объект всегда заказан этим клиентом.
-    FOR v_i IN 1..cardinality(v_orders) LOOP
-        v_review_type := (enum_range(NULL::egorov_food.review_entity_type))[
-            floor(random() * cardinality(enum_range(NULL::egorov_food.review_entity_type)))::integer + 1
-        ];
+    -- 11. Добавляем по одному отзыву на каждый заказ.
+    FOR v_i IN 1..(value * 5) LOOP
+        v_random_number := floor(random() * 3)::integer;
+
+        IF v_random_number = 0 THEN
+            v_review_type := 'блюдо';
+        ELSIF v_random_number = 1 THEN
+            v_review_type := 'ресторан';
+        ELSE
+            v_review_type := 'заказ';
+        END IF;
+
         INSERT INTO egorov_food.review
             (client_id, review_timestamp, entity_id, entity_type, order_id,
              description, photo_url, rating)
-        VALUES (
-            v_order_clients[v_i], LEAST(v_order_timestamps[v_i] + interval '2 hours', localtimestamp),
+        SELECT
+            o.client_id,
+            LEAST(o.order_timestamp + interval '2 hours', localtimestamp),
             CASE v_review_type
-                WHEN 'блюдо' THEN v_order_products[v_i]
-                WHEN 'ресторан' THEN v_order_restaurants[v_i]
-                ELSE v_orders[v_i]
+                WHEN 'блюдо' THEN o.product_id
+                WHEN 'ресторан' THEN o.restaurant_id
+                ELSE o.order_id
             END,
-            v_review_type, v_orders[v_i],
+            v_review_type,
+            o.order_id,
             'Тестовый отзыв ' || v_i || ': ' || substring(md5(random()::text), 1, 12),
-            CASE WHEN random() < 0.30 THEN NULL
-                 ELSE 'https://cdn.foodexpress.ru/reviews/' || md5(random()::text) || '.jpg' END,
+            CASE
+                WHEN random() < 0.30 THEN NULL
+                ELSE 'https://cdn.foodexpress.ru/reviews/' || md5(random()::text) || '.jpg'
+            END,
             (floor(random() * 5)::integer + 1)::numeric(2,1)
-        );
+        FROM tmp_food_orders o
+        WHERE o.row_number = v_i;
     END LOOP;
 
-    -- 12. История выплат за шесть последних календарных месяцев.
-    --     Для каждого курьера и каждого месяца создаётся ровно одна строка.
-    --     coefficient_used применяется к комиссиям доставленных заказов.
-    --     Новый коэффициент определяется по числу доставок и действует далее.
+    -- 12. Создаём историю выплат за шесть последних календарных месяцев.
     FOR v_i IN 1..value LOOP
         v_coefficient := 0.1;
+
+        SELECT courier_id
+        INTO v_id
+        FROM tmp_food_couriers
+        WHERE row_number = v_i;
+
         FOR v_j IN 0..5 LOOP
-            v_month_start := (date_trunc('month', current_date)::date -
-                              ((5 - v_j) * interval '1 month'))::date;
+            v_month_start := (
+                date_trunc('month', current_date)::date -
+                ((5 - v_j) * interval '1 month')
+            )::date;
+
             SELECT count(*), COALESCE(sum(o.commission), 0)
-              INTO v_deliveries, v_commission_sum
-              FROM egorov_food."order" o
-             WHERE o.courier_id = v_couriers[v_i]
-               AND o.status = 'доставлен'
-               AND o.order_timestamp >= v_month_start::timestamp
-               AND o.order_timestamp < (v_month_start + interval '1 month');
+            INTO v_deliveries, v_commission_sum
+            FROM egorov_food."order" o
+            WHERE o.courier_id = v_id
+              AND o.status = 'доставлен'
+              AND o.order_timestamp >= v_month_start::timestamp
+              AND o.order_timestamp < (v_month_start + interval '1 month');
 
             INSERT INTO egorov_food.courier_pay
                 (year, month, courier_id, amount, coefficient_used)
             VALUES (
                 extract(year FROM v_month_start)::integer,
                 extract(month FROM v_month_start)::integer,
-                v_couriers[v_i],
+                v_id,
                 round(v_coefficient * v_commission_sum, 2),
                 v_coefficient
             );
@@ -290,19 +421,18 @@ BEGIN
             ELSE
                 v_next_coefficient := 0.5;
             END IF;
+
             v_coefficient := v_next_coefficient;
         END LOOP;
 
-        -- После последнего месяца coefficient хранит коэффициент следующего месяца.
+        -- Коэффициент после последнего месяца будет действовать в следующем месяце.
         UPDATE egorov_food.courier
-           SET coefficient = v_coefficient
-         WHERE courier_id = v_couriers[v_i]
-           AND status <> 'уволен';
+        SET coefficient = v_coefficient
+        WHERE courier_id = v_id
+          AND status <> 'уволен';
     END LOOP;
 END;
 $$;
-
-
 -- ============================================================
 -- FOOD-103. Удаление тестовых данных
 -- ============================================================
