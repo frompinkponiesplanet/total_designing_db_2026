@@ -11,13 +11,17 @@
 ## 1. Подготовка и восстановление backup
 
 
-### 1.1. Создать чистую тестовую базу
+### 1.1. Создать чистую тестовую базу и схему exts
 
 Если база уже существует, удалить и создать заново:
 
 ```bash
 dropdb -U postgres --if-exists foodexpress_check
 createdb -U postgres foodexpress_check
+```
+```sql
+CREATE SCHEMA IF NOT EXISTS exts;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA exts;
 ```
 
 ### 1.2. Восстановить архив под postgres
@@ -31,7 +35,6 @@ pg_restore -h localhost -p 5432 -U postgres -W -d foodexpress_check --no-owner f
 ### 1.3. Применить grants.sql под postgres
 
 Скрипт:
-
 grants.sql
 
 
@@ -39,7 +42,7 @@ grants.sql
 ### 1.5. Подключиться как inspector и запустить SQL-файл
 
 ```bash
-psql -U inspector -d foodexpress -h localhost
+psql -U inspector -d foodexpress_check -h localhost
 ```
 
 Введи пароль `NetoSQL2025`. Внутри `psql` можно выполнить весь тестовый SQL-файл:
