@@ -1,3 +1,0 @@
-vboxuser@ubuntu:~/Desktop/project/SQL/total_designing_db_2026/db$ pg_dump -h localhost -p 5432 -U postgres -d foodexpress -Fc -n egorov_food -f foodexpress_egorov.backup
-vboxuser@ubuntu:~/Desktop/project/SQL/total_designing_db_2026/db$ pg_restore -h localhost -p 5432 -U postgres -W -d foodexpress_check --no-owner foodexpress_egorov.backup
-
